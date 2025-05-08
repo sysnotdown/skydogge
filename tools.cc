@@ -375,3 +375,28 @@ void global_dist_angle_to_gps(double lati0, double logi0, float dist, float angl
 #undef ER
 #undef cratio
 }
+
+// 计算两个角度之间的最小差值（考虑-180~180循环）
+float angularDistance(float a, float b) {
+    float diff = fabs(a - b);
+    return std::min(diff, 360.0f - diff);
+}
+
+// 计算角度的平均值 -180~180
+float circularMean(const std::vector<float>& angles) 
+{
+    float sum_sin = 0.0f, sum_cos = 0.0f;
+    
+    for (float angle : angles) {
+        float rad = angle  / 57.2958f;
+        sum_sin += sin(rad);
+        sum_cos += cos(rad);
+    }
+    
+   
+    float mean_deg = atan2(sum_sin, sum_cos)*57.2958;
+    return mean_deg;
+    // 规范化到[-180, 180)范围
+    //mean_deg = fmod(mean_deg + 180.0f, 360.0f);
+    //return (mean_deg >= 0) ? mean_deg - 180.0f : mean_deg + 180.0f;
+}

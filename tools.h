@@ -7,3 +7,5 @@ void global_gps_dist_angle(double lati0, double logi0, double lati1, double logi
 void global_dist_angle_to_gps(double lati0, double logi0, float dist, float angle, double& lati1, double& logi1);
 int ParseTaskList(std::string items, std::vector<std::string>& splits);
 int ParseFloatList(std::string items, std::vector<float>& vals);
+float circularMean(const std::vector<float>& angles);
+float angularDistance(float a, float b);

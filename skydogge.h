@@ -86,8 +86,8 @@
 //#define BALANCE_RATIO (1.0) //2306.5 碳纤架  20250323 缩小百倍
 
 //这两个也可以考虑放进配置表里, BARH, TOFH
-#define BARO_HEIGHT_RATIO (0.12) //气压控高主参数
-#define TOF_HEIGHT_RATIO (0.10) //测距控高主参数
+#define BARO_HEIGHT_RATIO (0.10) //气压控高主参数
+#define TOF_HEIGHT_RATIO (0.08) //测距控高主参数
 
 #define LED_PIN (25)
 #define CURRENT_PIN (26) //接电调的电流表, 老板子是29, 新板子26

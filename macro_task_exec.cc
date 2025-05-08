@@ -196,6 +196,12 @@ void CMacroTaskExec::macro_vertical_relative_height_adjust(_macro_task& task, bo
         task.target_gps_height = last_gps.height + task.vertical_adjust_height;
 
         float target_press= air_press_height_refer(pi.press, task.vertical_adjust_height); //新的气压推断函数更准确
+        
+        if(target_press < 30500.0) {
+            target_press=30500.0; //受到bmp390量程范围限制，其数据不可能低于30000，低于这个值永远达不到。附加500冗余值。
+            Send_remote_message("targ press limit to 30500.");
+            logmessage("targ press limit to 30500.\n");
+        }
 
         float tor= fabs(target_press - pi.press)*0.05; //5%气压容错范围
         if(tor<12.0) tor=12.0;
@@ -410,6 +416,12 @@ void CMacroTaskExec::macro_vertical_absolute_height_adjust(_macro_task& task, bo
         //线性推断气压推断更准确。
         //float target_press= air_press_height_refer(initial_press_info.press, task.target_gps_height - initial_gps_info.height); 
         float target_press= air_press_height_refer(pi.press, task.target_gps_height - last_gps.height); //以当前气压和高度差推断目标气压。
+
+        if(target_press < 30500.0) {
+            target_press=30500.0; //受到bmp390量程范围限制，其数据不可能低于30000，低于这个值永远达不到。附加500冗余值。
+            Send_remote_message("targ press limit to 30500.");
+            logmessage("targ press limit to 30500.\n");
+        }
 
         //这里容错范围3%小了，在地面气压101800时，气压偏高于日常，然后向上飞到海拔200米的气压计算偏离，导致在190米高度时触到了低压值停止上升了。
         //为了尽可能使用GPS定高，放松到5%

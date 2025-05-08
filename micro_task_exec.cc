@@ -43,7 +43,10 @@ extern bool _intof; //高度控制是否处于测距模式下。
 
 //指向正北的yaw角度。
 extern float _heading_yaw;
-//extern float _heading_reliable; //20240405+
+extern float _heading_yaw_reliable; //20250414+
+extern uint32_t _heading_yaw_update_counter;
+float ten_heading[10]; //10个方向暂存数据。用于盲目起飞时的方向识别。
+
 #if defined USE_QMC5883 || defined USE_HMC5883
 extern uint32_t _heading_yaw_last_update_time;
 #endif
@@ -72,6 +75,9 @@ extern float balance_d_ratio; //BALD
 extern float balance_x_ratio; //BALX
 extern float balance_w_ratio; //BALW
 extern float balance_z_ratio; //BALZ
+
+extern float tof_height_main_ratio;  //暂不使用
+extern float baro_height_main_ratio;//暂不使用
 //20250110+ 由控高函数灌入，平飞函数参考使用，用来避免角度死锁。
 //float height_bias=0; //真实高差，单位米，平飞时需关注这个高差，出现异常时可能是陷入了角度死锁，此时需要减小倾角。
 
@@ -105,6 +111,10 @@ __not_in_flash("data") NRandQueue<gps_major_bias> gps_major_bias_queue(15); //�
 #define isNINF(x) ((x)==NINF)
 
 #define FLOAT_LIMIT(a, low, high) { if(a<low) a=low; if(a>high) a=high;}
+
+
+
+NRandQueue<acc_heading_fit> acc_heading_fit_queue(42);
 
 //20221219实验表明，后方电机产生的风力确实影响气压值。
 //油门量，气压降低【pa】
@@ -329,30 +339,47 @@ void CMicroTaskExec::micro_task_ground_up()
         float pb= oflow_bias_queue.last().pitch_bias;
         float rb= oflow_bias_queue.last().roll_bias;    
     #elif defined USE_GPS
-        gps_position_adjust();
-        float pb= gps_major_bias_queue.last().pitch_bias;
-        float rb= gps_major_bias_queue.last().roll_bias;
+        bool gpa= gps_position_adjust();
     #endif
 
-        if(fabs(micro_task.pitch)<0.01 && fabs(micro_task.roll)<0.01)
+        if(micro_task.pitch==0 && micro_task.roll==0)
         {
-            exec_pitch=pb;
-            exec_roll=rb;
+            if(gpa) {
+                exec_pitch=gps_major_bias_queue.last().pitch_bias;
+                exec_roll=gps_major_bias_queue.last().roll_bias;
+            }else{
+                exec_pitch=0;
+                exec_roll=0;
+            }
+            
         }
-        else if(fabs(micro_task.pitch)<0.01)
+        else if(micro_task.pitch==0)
         {
-            exec_pitch=pb;
-            exec_roll= micro_task.roll;
+            if(gpa)
+            {
+                exec_pitch=gps_major_bias_queue.last().pitch_bias;
+            }
+            else
+            {
+                exec_pitch=0;
+            }
+
+            exec_roll= float(micro_task.roll)/3.0;
         }
-        else if(fabs(micro_task.roll)<0.01)
+        else if(micro_task.roll==0)
         {
-            exec_pitch=micro_task.pitch;
-            exec_roll= rb; 
+            exec_pitch= float(micro_task.pitch)/3.0;
+            if(gpa) {
+                exec_roll= gps_major_bias_queue.last().roll_bias;
+            }else{
+                exec_roll= 0; 
+            }
+            
         }
         else
         {
-            exec_pitch=micro_task.pitch;
-            exec_roll= micro_task.roll;
+            exec_pitch=float(micro_task.pitch)/3.0;
+            exec_roll= float(micro_task.roll)/3.0;
         }
 
         
@@ -441,8 +468,8 @@ void CMicroTaskExec::micro_task_ground_up()
 
     height_adjust_with_landing_detect(INAIR_BOTTHRUST, INAIR_TOPTHRUST, landed);
 
-    float exec_pitch=0;
-    float exec_roll=0;
+    float exec_pitch= float(micro_task.pitch)/3.0;
+    float exec_roll= float(micro_task.roll)/3.0;
     
 #if defined USE_OFLOW
     if(oflow_position_adjust_minor_change())
@@ -451,7 +478,7 @@ void CMicroTaskExec::micro_task_ground_up()
         exec_roll=oflow_bias_queue.last().roll_bias;
     }
 #elif defined USE_GPS
-    if(gps_position_adjust())
+    if(_initial_heading_update_method!=head_none && gps_position_adjust())
     {
         exec_pitch= gps_major_bias_queue.last().pitch_bias;
         exec_roll= gps_major_bias_queue.last().roll_bias;
@@ -482,7 +509,7 @@ void CMicroTaskExec::micro_task_ground_up()
     uint32_t now = get_time_mark();
 
     //下面是检查起飞失败代码。
-    if(now - micro_task.timemark > 30*1000)
+    if(now - micro_task.timemark > 15*1000)
     {
         if(_inair) {
             micro_task.status=_micro_task_status_done;
@@ -1347,9 +1374,10 @@ void CMicroTaskExec::micro_task_move_ahead_with_yaw()
 
     if(micro_task.status==_micro_task_status_none)
     {
-        if(micro_task.vspeed!=0) micro_task.vspeed=0; //保持高度，气压协同GPS
-        if(micro_task.roll!=0) micro_task.roll=0;
-        if(micro_task.yawspeed!=0) micro_task.yawspeed=0;
+        micro_task.vspeed=0; //保持高度，气压协同GPS
+        micro_task.roll=0;
+        micro_task.pitch=0;
+        micro_task.yawspeed=0;
 
         micro_task.status=_micro_task_status_inprogress;
     }
@@ -1366,10 +1394,8 @@ void CMicroTaskExec::micro_task_move_ahead_with_yaw()
     float new_thrust;
 
     //oflow_position_adjust();
-    //balance(ref_burden, burden, micro_task.pitch + oflow_bias_queue.last().pitch_bias, micro_task.roll + oflow_bias_queue.last().roll_bias);
 
-    //balance(ref_burden, burden, micro_task.pitch, micro_task.roll);
-    balance(new_burden, new_thrust, micro_task.pitch, micro_task.roll);
+    balance(new_burden, new_thrust, float(micro_task.pitch)/3.0, float(micro_task.roll)/3.0);
 
     motor_ctrl.SetBurdens(new_burden, new_thrust);
 
@@ -3815,7 +3841,7 @@ bool CMicroTaskExec::gps_position_adjust()
 {
 #ifdef USE_GPS
 
-    if(fabs(micro_task.roll)>0.01 || fabs(micro_task.pitch)>0.01)
+    if(micro_task.roll|| micro_task.pitch)
     {
         //取消锚点，冲刷历史记录。
         micro_task.gps_anchor=false;
@@ -5038,7 +5064,7 @@ bool CMicroTaskExec::oflow_position_adjust_minor_change()
 
     oflow_bias record;
     
-    if(fabs(micro_task.roll)<0.01 && !micro_task.oflow_anchor_x && fabs(sum_a_x) < 0.2 && fabs(sum_b_x) < 0.2) {
+    if(micro_task.roll==0 && !micro_task.oflow_anchor_x && fabs(sum_a_x) < 0.2 && fabs(sum_b_x) < 0.2) {
 
         micro_task.oflow_anchor_x=true;
         //清理部分历史记录，这样不会有残余的参考值，20230822+
@@ -5051,18 +5077,18 @@ bool CMicroTaskExec::oflow_position_adjust_minor_change()
         //micro_task.oflow_sumx=last_tof.sumx;
         record.offset_sumx=0; //总偏记录现在改在这里。因为不使用光流处理的累计量，所以总偏需要自己累加。
     }
-    else if(fabs(micro_task.roll)>=0.01 && micro_task.oflow_anchor_x) {
+    else if(micro_task.roll && micro_task.oflow_anchor_x) {
         micro_task.oflow_anchor_x=false;
         record.offset_sumx=0; //为了在打开锚点的瞬间取历史数据时避免取到非0数据，产生初始位移。
         adjust_x=false;
     }
-    else if(fabs(micro_task.roll)>=0.01) {
+    else if(micro_task.roll) {
         record.offset_sumx=0; //为了在打开锚点的瞬间取历史数据时避免取到非0数据，产生初始位移。
         micro_task.oflow_anchor_x=false;
         adjust_x=false;
     }
 
-    if(fabs(micro_task.pitch)<0.01 && !micro_task.oflow_anchor_y && fabs(sum_a_y) < 0.2 && fabs(sum_b_y)<0.2) {
+    if(micro_task.pitch==0 && !micro_task.oflow_anchor_y && fabs(sum_a_y) < 0.2 && fabs(sum_b_y)<0.2) {
 
         micro_task.oflow_anchor_y=true;
         //清理部分历史记录，这样不会有残余的参考值，20230822+
@@ -5075,12 +5101,12 @@ bool CMicroTaskExec::oflow_position_adjust_minor_change()
         //micro_task.oflow_sumy=last_tof.sumy;
         record.offset_sumy=0; //总偏记录现在改在这里。因为不使用光流处理的累计量，所以总偏需要自己累加。
     }
-    else if(fabs(micro_task.pitch)>=0.01 && micro_task.oflow_anchor_y) {
+    else if(micro_task.pitch && micro_task.oflow_anchor_y) {
         micro_task.oflow_anchor_y=false;
         record.offset_sumy=0; //为了在打开锚点的瞬间取历史数据时避免取到非0数据，产生初始位移。
         adjust_y=false;
     }
-    else if(fabs(micro_task.pitch)>=0.01) {
+    else if(micro_task.pitch) {
         record.offset_sumy=0; //为了在打开锚点的瞬间取历史数据时避免取到非0数据，产生初始位移。
         adjust_y=false;
         micro_task.oflow_anchor_y=false;
@@ -5321,7 +5347,77 @@ int CMicroTaskExec::switch_fixpoint_mod()
     return micro_task.position_keep_switch;
 }
 
+//60度角扫描全范围，覆盖最多的数据点就认为是主方向，然后求均值。
+float CMicroTaskExec::findDominantDirection(const vector<float>& angles) 
+{
+    // 寻找最佳中心点
+    struct BestResult {
+        float center;
+        int count;
+    }best;
+
+    best={0,0};
+
+    for (float center : angles) {
+        int count = count_if(angles.begin(), angles.end(), 
+            [center](float a) { return angularDistance(a, center) <= 60.0/2; });
+        
+        // 当数量相同时，选择更靠近中心的分布
+        if (count > best.count || 
+           (count == best.count && 
+            abs(center) < abs(best.center))) {
+            best = {center, count};
+        }
+    }
+
+    // 第二阶段：收集目标区域内的角度
+    vector<float> cluster;
+    copy_if(angles.begin(), angles.end(), back_inserter(cluster),
+        [best](float a) { return angularDistance(a, best.center) <= 60.0/2; });
+
+    // 第三阶段：计算循环平均值
+    return circularMean(cluster);
+}
+
+float CMicroTaskExec::findDominantDirection( vector<acc_heading_fit>& angles, float& accnorm)
+{
+	// 寻找最佳中心点
+	struct BestResult {
+		float center;
+		int count;
+	}best;
+
+	best = { 0,0 };
+
+	for (acc_heading_fit center : angles) {
+		int count = count_if(angles.begin(), angles.end(),
+			[center](acc_heading_fit& a) { return angularDistance(a.heading, center.heading) <= 60.0 / 2; });
+
+		// 当数量相同时，选择更靠近中心的分布
+		if (count > best.count) {
+			best = { center.heading, count };
+		}
+	}
+
+	// 第二阶段：收集目标区域内的角度
+	vector<acc_heading_fit> cluster;
+	copy_if(angles.begin(), angles.end(), back_inserter(cluster),
+		[best](acc_heading_fit& a) { return angularDistance(a.heading, best.center) <= 60.0 / 2; });
+
+	// 第三阶段：计算循环平均值
+	vector<float> angs;
+	accnorm = 0.0;
+	for (size_t i = 0; i < cluster.size(); i++) {
+		angs.push_back(cluster[i].heading);
+		accnorm += sqrt(cluster[i].gps_acc_norm*cluster[i].imu_acc_norm);
+	}
+	accnorm /= cluster.size();
+
+	return circularMean(angs);
+}
+
 //完全遥控指令下的执行。高度盯住气压，姿态盯住设置。最后还有总力的限制。
+#if 0
 void CMicroTaskExec::micro_task_on_remote()
 {
 
@@ -5333,33 +5429,12 @@ void CMicroTaskExec::micro_task_on_remote()
 
     micro_task.status=_micro_task_status_inprogress;
 
-    // if(micro_task.status==_micro_task_status_none)
-    // {
-    //     micro_task.help_takeoff=false; //20231215+
-    //     micro_task.status=_micro_task_status_inprogress;
-    // }
-    // else if(micro_task.status == _micro_task_status_remote_done)
-    // {
-    //     //这个状态下，飞机已经落地停机。
-    //     return; 
-    // }
-
-
-    //现在使用以气压为主，tof辅助的控高，应该不用担心tof数据错误导致的冲高。
-   // height_adjust_by_baro_with_tof(1.2, INAIR_TOPTHRUST);
-
-    //bool new_height_thrust;
+    //当_initial_heading_update_method==head_none时，不应该调用gps_position_adjust,因为方向不具备
+    //而应该执行遥控指令，按每个gps数据点去记录机身偏角，然后去匹配一个方向出来，
+    //此间遥控器可以执行一些前后左右的遥控动作，算法去匹配方向，当方向的精度达到要求后，才放开执行定点操作。
+    //这是后期的工作。
 
     bool landed=false;
-    // if(micro_task.height_keep_switch)
-    // {
-    //     //height_adjust_by_baro(INAIR_BOTTHRUST, INAIR_TOPTHRUST); //高空控制型，只用气压
-    //     hyper_height_adjust_by_baro(INAIR_BOTTHRUST, INAIR_TOPTHRUST);
-    // }
-    // else
-    // {
-    //     height_adjust(INAIR_BOTTHRUST, INAIR_TOPTHRUST);   //通用型，先测距后气压
-    // }
 
     //uint64_t tk1=get_time_us_mark(); //for debug
 
@@ -5368,6 +5443,64 @@ void CMicroTaskExec::micro_task_on_remote()
         motor_ctrl.SetBurdens(0,0,0,0,0);
         micro_task.status=_micro_task_status_shutdown;
         _inair=false; //全局空中标记
+        return;
+    }
+
+    //20250414+ 方向不明确，等待遥控打杆后判断。
+    if(_initial_heading_update_method==head_none && _heading_yaw_reliable < 100.0)
+    {
+        //uint32_t now=get_time_mark();
+        gps_info g0,g1; //5个历史数据做平均处理。
+
+        //当前速度用g0,g1均值。加速度用g2,g3均值去减，位置用g0-g4均值
+        critical_section_enter_blocking(&gps_queue_section);
+        g0=gps_queue.last(0);
+        g1=gps_queue.last(1);
+        critical_section_exit(&gps_queue_section);
+
+        if(micro_task.pitch < -15 && abs(micro_task.roll) < 5 && g0.speed > 2.5)
+        {
+            //摇杆前推动作，且roll方向不明显打杆，且速度起来了，那么可以假定速度方向就是机头方向。
+            //g0.direction;// 0-360度。
+            float cur_pitch, cur_roll, cur_yaw;
+            critical_section_enter_blocking(&imu_queue_section);
+            cur_pitch=imu_queue.last().angle[0];
+            cur_roll=imu_queue.last().angle[1];
+            cur_yaw=imu_queue.last().angle[2];
+            critical_section_exit(&imu_queue_section);
+
+            char dbg[128];
+            if(_heading_yaw_update_counter==0)
+            {
+                _heading_yaw = cur_yaw + g0.direction;
+                if(_heading_yaw>180.0) _heading_yaw-=360.0;
+                else if(_heading_yaw<-180.0) _heading_yaw+= 360.0;
+                sprintf(dbg, "fu,%3.2f,%3.2f,%3.2f,%3.2f\n", g0.direction, g0.speed, cur_yaw, _heading_yaw);
+                logmessage(dbg);
+            }
+            else
+            {
+                float k= cur_yaw + g0.direction;
+                float dif= k - _heading_yaw;
+                _heading_yaw += dif*0.3;
+                if(_heading_yaw>180.0) _heading_yaw-=360.0;
+                else if(_heading_yaw<-180.0) _heading_yaw+= 360.0;
+
+                sprintf(dbg, "u,%3.2f,%3.2f,%3.2f,%3.2f\n", g0.direction, g0.speed, cur_yaw, _heading_yaw);
+                logmessage(dbg);
+            }
+
+            _heading_yaw_reliable+=0.1;
+            _heading_yaw_update_counter++;
+
+        }
+        
+
+        float new_burdens[4];
+        float new_thrust;
+        balance(new_burdens, new_thrust, float(micro_task.pitch)/3.0, float(micro_task.roll)/3.0);
+        motor_ctrl.SetBurdens(new_burdens, new_thrust);
+
         return;
     }
 
@@ -5398,42 +5531,13 @@ void CMicroTaskExec::micro_task_on_remote()
         
     }
 #elif defined USE_GPS && !defined USE_OFLOW
-        //仅GPS水平定位。
-    //old 
+    //仅GPS水平定位。
     bool b0=gps_position_adjust(); 
     if(b0){
         pb= gps_major_bias_queue.last().pitch_bias;
         rb= gps_major_bias_queue.last().roll_bias;
     }
 
-    //考虑修改合并代码，取消gps_adjust函数。
-    // if(fabs(micro_task.roll)>0.01 || fabs(micro_task.pitch)>0.01)
-    // {
-    //     //取消锚点，冲刷历史记录。
-    //     micro_task.gps_anchor=false;
-    //     pb=0;
-    //     rb=0;
-    // }
-
-
-    // if(!micro_task.gps_anchor) {
-    //    bool b0=gps_position_brake();
-    //    if(b0) {
-    //         pb= gps_major_bias_queue.last().pitch_bias;
-    //         rb= gps_major_bias_queue.last().roll_bias;
-    //    }else{
-    //         pb=0;
-    //         rb=0;
-    //    }
-    // }
-    // else
-    // {
-    //     float cur_dist, cur_spd, cur_dir, cur_height;
-    //     bool newdata;
-    //     pin_to_location(cur_dist, cur_spd, cur_dir, cur_height, newdata);
-    //     pb= gps_major_bias_queue.last().pitch_bias;
-    //     rb= gps_major_bias_queue.last().roll_bias;
-    // }
 
 #elif defined USE_OFLOW && !defined USE_GPS
         //未使用GPS，但使用光流
@@ -5448,9 +5552,9 @@ void CMicroTaskExec::micro_task_on_remote()
 
     float new_burdens[4];
     float new_thrust;
-    if(fabs(micro_task.pitch)>0.01||fabs(micro_task.roll)>0.01)
+    if(micro_task.pitch||micro_task.roll)
     {
-        balance(new_burdens, new_thrust, micro_task.pitch, micro_task.roll);
+        balance(new_burdens, new_thrust, float(micro_task.pitch)/3.0, float(micro_task.roll)/3.0);
     }
     else
     {
@@ -5462,7 +5566,312 @@ void CMicroTaskExec::micro_task_on_remote()
     motor_ctrl.SetBurdens(new_burdens, new_thrust);
 
 }
+#endif
 
+//加速度匹配法。
+void CMicroTaskExec::micro_task_on_remote()
+{
+
+    if(micro_task.status == _micro_task_status_shutdown)
+    {
+        //这个状态下，飞机已经落地停机。
+        return; 
+    }
+
+    micro_task.status=_micro_task_status_inprogress;
+
+    //当_initial_heading_update_method==head_none时，不应该调用gps_position_adjust,因为方向不具备
+    //而应该执行遥控指令，按每个gps数据点去记录机身偏角，然后去匹配一个方向出来，
+    //此间遥控器可以执行一些前后左右的遥控动作，算法去匹配方向，当方向的精度达到要求后，才放开执行定点操作。
+    //这是后期的工作。
+
+    bool landed=false;
+
+    //uint64_t tk1=get_time_us_mark(); //for debug
+
+    bool hadj=height_adjust_with_landing_detect(INAIR_BOTTHRUST, INAIR_TOPTHRUST, landed);
+    if(hadj && landed) {
+        motor_ctrl.SetBurdens(0,0,0,0,0);
+        micro_task.status=_micro_task_status_shutdown;
+        _inair=false; //全局空中标记
+        return;
+    }
+
+    //20250414+ 方向不明确，等待遥控打杆后判断。
+    if(_initial_heading_update_method==head_none && _heading_yaw_reliable < 0.8)
+    {
+        uint32_t dtime;
+        gps_info g0,g1,g2,g3,g4; //5个历史数据做平均处理。
+
+        //当前速度用g0,g1均值。加速度用g2,g3均值去减，位置用g0-g4均值
+        critical_section_enter_blocking(&gps_queue_section);
+        g0=gps_queue.last(0);
+        g1=gps_queue.last(1);
+        g2=gps_queue.last(2);
+        g3=gps_queue.last(3);
+        g4=gps_queue.last(4);
+        critical_section_exit(&gps_queue_section);
+
+        dtime=g0.tmark;
+
+        if(gps_major_bias_queue.last().gps_tmark==dtime || _heading_yaw_update_counter >=10) {
+            //本次数据已记录，无需再次处理，直接处理平衡。
+            float new_burdens[4];
+            float new_thrust;
+            balance(new_burdens, new_thrust, float(micro_task.pitch)/3.0, float(micro_task.roll)/3.0);
+            motor_ctrl.SetBurdens(new_burdens, new_thrust);
+        }else{
+
+            //新的gps数据，记录并分析方向。
+            float cur_yaw;
+            float imuaccx=0; float imuaccy=0;
+            critical_section_enter_blocking(&imu_queue_section);
+            cur_yaw=imu_queue.last().angle[2];
+            for(int i=0;i<15;i++) {
+                imuaccx+= imu_queue.last(i).acc_gnd[0];
+                imuaccy+= imu_queue.last(i).acc_gnd[1];
+            }
+            critical_section_exit(&imu_queue_section);
+            imuaccx*=0.666; //求均值，换算为标准单位。m/s2
+            imuaccy*=0.666;
+            float imu_acc_ang=atan2(imuaccx, imuaccy)*57.2958;
+            float imu_acc_norm= sqrt(imuaccx*imuaccx + imuaccy*imuaccy);
+
+            if(acc_heading_fit_queue.last(5).valid) {
+
+                //char dbg[256];
+
+                //分析GPS加速度，然后去匹配roll/pitch变化，这里暂时假设yaw没有变化。
+                uint32_t tgap2 = g0.tmark - g2.tmark;
+                float t2_inverse= 1000.0/float(tgap2);
+                uint32_t tgap3 = g0.tmark - g3.tmark;
+                float t3_inverse= 1000.0/float(tgap3);
+
+                //加速度 去掉最近的一个差值，时间太短了，误差波动太大。
+                float accEast2 = (g0.speed_east- g2.speed_east)*t2_inverse; //标准单位,m/s/s
+                float accNorth2= (g0.speed_north-g2.speed_north)*t2_inverse;
+                float accEast3 = (g0.speed_east- g3.speed_east)*t3_inverse; //标准单位,m/s/s
+                float accNorth3= (g0.speed_north-g3.speed_north)*t3_inverse;
+
+                //2个加速度等权重处理
+                float accEast= (accEast2+accEast3)/2.0;
+                float accNorth= (accNorth2+accNorth3)/2.0;
+                float gps_acc_ang= atan2(accEast, accNorth)*57.2958; //世界坐标下的加速度变化方向，（-180，180）
+                float gps_acc_norm=sqrt(accEast*accEast+accNorth*accNorth);
+
+                //旋转imu_acc_ang抵达gps_acc_ang，看旋转多少度，往那边旋转，然后旋转当前的yaw同样的度数既是heading.
+                //imu的加速度信息一定早于gps, 需要在记录队列里向前寻找。估计要早于GPS 2-6个数据点，即0.2-0.6秒
+                float old_imu_acc_ang= acc_heading_fit_queue.last(3).imu_acc_ang; //选last(3)是提前4个数据。0.4秒
+                //float old_imu_acc_norm= acc_heading_fit_queue.last(3).imu_acc_norm;
+                //选择0.4秒前的imu数据去匹配，大多数时候能正确匹配方向，少数情况是反向。可考虑上下调节一个点。
+
+                float rotate= gps_acc_ang - old_imu_acc_ang;
+                if(rotate > 180.0) rotate-= 360.0;
+                else if(rotate < -180.0) rotate+= 360.0;
+                //如果rotate>0,即顺时针转，
+                float heading= cur_yaw + rotate; //加法
+                if(heading>180.0) heading-= 360.0;
+                else if(heading<-180.0) heading+= 360.0;
+
+                //sprintf(dbg,"op,%3.2f,%3.2f,%3.2f,%3.2f,%3.2f,%3.2f\n",old_imu_acc_norm,gps_acc_norm, old_imu_acc_ang, gps_acc_ang, cur_yaw, heading);
+                //logmessage(dbg);
+
+                //由于时间同步性，匹配可能会造成误差甚至是完全反向，所以累计一定数量的匹配点，排除少数的反向匹配，选择大多数的正向匹配，然后取平均值。
+                acc_heading_fit one;
+                one.valid=true;
+                one.gps_acc_ang= gps_acc_ang;
+                one.imu_acc_ang= imu_acc_ang;
+                one.gps_acc_norm = gps_acc_norm;
+                one.imu_acc_norm = imu_acc_norm;
+                one.heading=heading;
+                acc_heading_fit_queue.push(one);
+
+                //最好计算拉开间隔，避免连续的错误判断。
+                //acc_heading_fit_queue是连续计算存放的，每秒10个，但累计的40个数据的计算最好拉开差距，不是每次都算，而是隔10个数据计算一个主方向
+
+                if(acc_heading_fit_queue.last(40).valid)
+                {
+                    //至少有30个数据点可以分析，那么就开始分析，积累一定的数据点主要用来排除可能的少数反向匹配。
+                    //首先排除掉队列中加速度最小的8个点，剩余的12个点做分析。
+                    //然后分析排除少部分反向匹配的数据。最后给出一个方向估计值。
+
+                    std::vector<acc_heading_fit> vec;
+                    for(int i=0;i<40;i++) {
+                        vec.push_back(acc_heading_fit_queue.last(i));
+                    }
+                    
+                    float mean_norm;
+                    float domi = findDominantDirection(vec, mean_norm);
+                    //sprintf(dbg,"np,%3.1f,%3.1f\n",domi, mean_norm);
+                    //logmessage(dbg);
+
+                    if(mean_norm > 0.8)
+                    {
+                        //记录一个有效方向识别数据。
+                        ten_heading[_heading_yaw_update_counter++]=domi;
+
+                        //sprintf(dbg,"nvp,%3.1f,%3.1f,%d\n", domi, mean_norm, _heading_yaw_update_counter);
+                        //logmessage(dbg);
+
+                        //实测显示，10个数据里偶尔有两个方向错误，有时一个也没有。
+                        if(_heading_yaw_update_counter>=10)
+                        {
+                            //记录已满，计算这10个方向的主方向。
+                            //sprintf(dbg,"full,%3.1f,%3.1f,%3.1f,%3.1f,%3.1f,%3.1f,%3.1f,%3.1f,%3.1f,%3.1f\n", 
+                            //ten_heading[0],ten_heading[1],ten_heading[2],ten_heading[3],ten_heading[4],ten_heading[5],ten_heading[6],ten_heading[7],ten_heading[8],ten_heading[9]);
+                            //logmessage(dbg);
+
+                            std::vector<float> allheading;
+                            allheading.resize(10);
+                            for(int i=0;i<10;i++) {
+                                allheading[i]=ten_heading[i];
+                            }
+
+                            float domi_heading= findDominantDirection(allheading);
+                            _heading_yaw=domi_heading;
+                            _heading_yaw_reliable=1.0; //标记方向可靠性，这之后就不会再判断方向了。
+                            // sprintf(dbg,"dir:%3.2f\n", domi_heading);
+                            // logmessage(dbg);
+                            // sprintf(dbg,"dir:%3.2f", domi_heading);
+                            Send_remote_message("heading fin.");
+                        }
+                    }
+                    
+
+                    //清除掉早期的10个数据，后来的计算会因为数据无标记认为数据还没有达到40个，这样就不会连续计算。
+                    //这样实现了1秒计算一个方向的目的。
+                    for(int i=0;i<10;i++)
+                    {
+                        acc_heading_fit_queue.last(40-i).valid=false;
+                    }
+                }
+
+            }
+            else
+            {
+                //历史记录不够，无法计算heading.
+
+                //分析GPS加速度，然后去匹配roll/pitch变化，这里暂时假设yaw没有变化。
+                uint32_t tgap2 = g0.tmark - g2.tmark;
+                float t2_inverse= 1000.0/float(tgap2);
+                uint32_t tgap3 = g0.tmark - g3.tmark;
+                float t3_inverse= 1000.0/float(tgap3);
+
+                //加速度 去掉最近的一个差值，时间太短了，误差波动太大。
+                float accEast2 = (g0.speed_east- g2.speed_east)*t2_inverse; //标准单位,m/s/s
+                float accNorth2= (g0.speed_north-g2.speed_north)*t2_inverse;
+                float accEast3 = (g0.speed_east- g3.speed_east)*t3_inverse; //标准单位,m/s/s
+                float accNorth3= (g0.speed_north-g3.speed_north)*t3_inverse;
+
+                //2个加速度等权重处理
+                float accEast= (accEast2+accEast3)/2.0;
+                float accNorth= (accNorth2+accNorth3)/2.0;
+                float gps_acc_ang= atan2(accEast, accNorth)*57.2958; //世界坐标下的加速度变化方向，（-180，180）
+                float gps_acc_norm=sqrt(accEast*accEast+accNorth*accNorth);
+
+
+                //由于时间同步性，匹配可能会造成误差甚至是完全反向，所以累计一定数量的匹配点，排除少数的反向匹配，选择大多数的正向匹配，然后取平均值。
+                acc_heading_fit one;
+                one.valid=true;
+                one.gps_acc_ang= gps_acc_ang;
+                one.imu_acc_ang= imu_acc_ang;
+                one.gps_acc_norm = gps_acc_norm;
+                one.imu_acc_norm = imu_acc_norm;
+                one.heading=0;
+                acc_heading_fit_queue.push(one);
+            }
+
+            float new_burdens[4];
+            float new_thrust;
+            balance(new_burdens, new_thrust, float(micro_task.pitch)/3.0, float(micro_task.roll)/3.0);
+            motor_ctrl.SetBurdens(new_burdens, new_thrust);
+        }
+
+        //调节记录，只有GPS速度和方向有效，只为避免重复的GPS数据，本函数每秒500次执行，但GPS数据只有10个。
+        gps_major_bias majorb;
+        majorb.gps_tmark=dtime;
+        majorb.world_castx = 0;
+        majorb.world_casty = 0;
+        majorb.gps_spdDir = g0.direction;
+        majorb.gps_spdEast = g0.speed_east;
+        majorb.gps_spdNorth = g0.speed_north;
+        majorb.gps_dist= 0;
+        majorb.gps_distEast=0;
+        majorb.gps_distNorth=0;
+        majorb.gps_spd=g0.speed;
+        majorb.roll_bias=0;
+        majorb.pitch_bias=0;
+        majorb.flight_real_x=0;
+        majorb.flight_real_y=0;
+        majorb.world_real_x = 0;
+        majorb.world_real_y = 0;
+        majorb.inuse=5; //标记是普通过程记录数据。
+        gps_major_bias_queue.push(majorb);
+
+        return;
+    }
+
+    float pb=0;
+    float rb=0;
+
+#if defined USE_GPS && defined USE_OFLOW
+    if(micro_task.position_keep_switch==1)
+    {
+        bool b0=gps_position_adjust(); 
+
+        if(b0){
+            pb= gps_major_bias_queue.last().pitch_bias;
+            rb= gps_major_bias_queue.last().roll_bias;
+
+        }else{
+            Send_remote_message(41);
+        }
+    }
+    else if(micro_task.position_keep_switch==0)
+    {
+        bool b0=oflow_position_adjust_minor_change(); 
+
+        if(b0){
+            pb= oflow_bias_queue.last().pitch_bias;
+            rb= oflow_bias_queue.last().roll_bias;
+        }
+        
+    }
+#elif defined USE_GPS && !defined USE_OFLOW
+    //仅GPS水平定位。
+    bool b0=gps_position_adjust(); 
+    if(b0){
+        pb= gps_major_bias_queue.last().pitch_bias;
+        rb= gps_major_bias_queue.last().roll_bias;
+    }
+
+
+#elif defined USE_OFLOW && !defined USE_GPS
+        //未使用GPS，但使用光流
+        bool b0=oflow_position_adjust_minor_change(); 
+        if(b0){
+            pb= oflow_bias_queue.last().pitch_bias;
+            rb= oflow_bias_queue.last().roll_bias;
+        }
+#endif
+
+    //uint64_t tk2=get_time_us_mark(); //for debug
+
+    float new_burdens[4];
+    float new_thrust;
+    if(micro_task.pitch||micro_task.roll)
+    {
+        balance(new_burdens, new_thrust, float(micro_task.pitch)/3.0, float(micro_task.roll)/3.0);
+    }
+    else
+    {
+        balance(new_burdens, new_thrust,  pb, rb);
+    }
+
+
+    motor_ctrl.SetBurdens(new_burdens, new_thrust);
+
+}
 
 //t:任务代码及任务参数
 //gi:姿态数据
@@ -7769,27 +8178,27 @@ bool CMicroTaskExec::height_adjust_by_tof_with_landing_detect(float botlmt, floa
 //#define RATIO (0.1) //2806比2306动力强太多，控高过于极端，减力过大导致砸落地面。
 //不能有太大的加速度和速度，向上和向下的加速度和速度都不能大。所以速度和加速度的调节参数较大。
 //单独的kp导致上下跳跃更大。
-#define Kp (0.07*TOF_HEIGHT_RATIO) //高差调节系数，高差来源于tof测量。
+#define Kp (0.07) //高差调节系数，高差来源于tof测量。
 
-#define Ki (0.04*TOF_HEIGHT_RATIO) //积分调节参数
+#define Ki (0.04) //积分调节参数
 
 //加强速度匹配因子0.1->0.3
 //由于向上大幅推杆后突然放松，机器会快速冲高然后迅速减力跌落，所以速度调节系数减小，原来0.5，现在改0.3，20231031
-#define Kd (0.35*TOF_HEIGHT_RATIO) //速度调节系数。因高差限制的较小，所以速度调节应该加大才对。
+#define Kd (0.35) //速度调节系数。因高差限制的较小，所以速度调节应该加大才对。
 //在tof有效下，这个可以调低
 //尝试降低这个调节值，减小依赖以防止震动带来过大影响。
-#define Kx (0.40*TOF_HEIGHT_RATIO) //加速度做阻尼很有效，可能是因为速度快，延迟小。但机架震动时很麻烦，容易失控。
+#define Kx (0.40) //加速度做阻尼很有效，可能是因为速度快，延迟小。但机架震动时很麻烦，容易失控。
 //减小为0.25，期待看到在测距控高下的高度上下波动，然后去寻找最佳参考推力延迟来减小震荡。
 //分别减小到0.25和0.035，高度波动不明显，继续降低。
 //分别减小到0.15和0.02，高度波动也不明显，继续降低。
 //分别减小到0.08和0.012，则高度严重震荡，几乎无法控制，最后是上升到气压控制区缓慢降落才控制下来。
 //#define Kx (0.20*RATIO) 
-#define Kxa (0.05*TOF_HEIGHT_RATIO) //加速度调节项。
+#define Kxa (0.05) //加速度调节项。
 
 //由于向上大幅推杆后突然放松，机器会快速冲高然后迅速减力跌落，所以阻尼加大，原来0.1，现在改0.4，0.8太大，20231031
-#define Ks (0.4*TOF_HEIGHT_RATIO) //存粹速度阻尼项。
-#define Ktx (0.1*TOF_HEIGHT_RATIO) //tof 加速度阻尼
-#define Kz (0.2*TOF_HEIGHT_RATIO) //测距微分阻尼
+#define Ks (0.4) //存粹速度阻尼项。
+#define Ktx (0.1) //tof 加速度阻尼
+#define Kz (0.2) //测距微分阻尼
 
 
     //这里不对称限制高差是希望下落时慢点。地面有深坑时不至于迅速坠下。地面隆起时可以较快的提高高度。
@@ -7842,7 +8251,7 @@ bool CMicroTaskExec::height_adjust_by_tof_with_landing_detect(float botlmt, floa
     float st16 = Kz*tof_dif*(1.05-flex); //测距微分阻尼项。20240223+
     float st17 = Ktx*SigmoidTrans(tof_acc)*(1.2-flex); //tof测量加速度阻尼项。
 
-    float change= st10+st11+st12+st13+st14+st15+st16+st17;
+    float change= (st10+st11+st12+st13+st14+st15+st16+st17)*TOF_HEIGHT_RATIO;
 
     if(micro_task.vspeed==0)
     {
@@ -7939,12 +8348,12 @@ bool CMicroTaskExec::height_adjust_by_tof_with_landing_detect(float botlmt, floa
     float adj5 = t_hd*0.1*TOF_HEIGHT_RATIO*(1.2-flex); 
     change += adj5;
 
-//速度调节
-    float adj6 = t_spd*0.2*TOF_HEIGHT_RATIO*(1.2-flex); 
+//速度调节  0.2->0.1
+    float adj6 = t_spd*0.1*TOF_HEIGHT_RATIO*(1.2-flex); 
     change += adj6;
 
-//加速度调节,阻尼
-    float adj7 = t_acc*0.3*TOF_HEIGHT_RATIO*(1.2-flex); 
+//加速度调节,阻尼，0.3->0.1
+    float adj7 = t_acc*0.1*TOF_HEIGHT_RATIO*(1.2-flex); 
     change += adj7;
 
     //单次调节限制。太大了震荡大。

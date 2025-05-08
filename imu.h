@@ -182,15 +182,18 @@ public:
 
         //20250327 尝试修正关于水平方向加速度的影响, 使用动态的kp值。
         float acc_norm= sqrt(accs[0]*accs[0]+accs[1]*accs[1]+accs[2]*accs[2]); //加速度的单位是G
-        if(acc_norm>1.414) dynamic_Kp=0.003;  //水平加速度>1G
-        else if(acc_norm>1.345) dynamic_Kp = 0.007; //9m/s2水平加速度。
-        else if(acc_norm>1.28) dynamic_Kp = 0.0125; //8m/s2水平加速度。
-        else if(acc_norm>1.22) dynamic_Kp = 0.025; //7m/s2水平加速度。
-        else if(acc_norm>1.166) dynamic_Kp = 0.05; //6m/s2水平加速度。
-        else if(acc_norm>1.12) dynamic_Kp = 0.1; //5m/s2水平加速度。
-        else if(acc_norm>1.077) dynamic_Kp = 0.2; //4m/s2水平加速度。
-        else if(acc_norm>1.044) dynamic_Kp = 0.5; //3m/s2水平加速度。
-        else if(acc_norm>1.02) dynamic_Kp = 0.8; //2m/s2水平加速度。
+        // if(acc_norm>1.414) dynamic_Kp=0.1;  //水平加速度>1G
+        // else if(acc_norm>1.345) dynamic_Kp = 0.2; //9m/s2水平加速度。
+        // else if(acc_norm>1.28) dynamic_Kp = 0.3; //8m/s2水平加速度。
+        // else if(acc_norm>1.22) dynamic_Kp = 0.4; //7m/s2水平加速度。
+        // else if(acc_norm>1.166) dynamic_Kp = 0.5; //6m/s2水平加速度。
+        // else if(acc_norm>1.12) dynamic_Kp = 0.6; //5m/s2水平加速度。
+        // else if(acc_norm>1.077) dynamic_Kp = 0.7; //4m/s2水平加速度。
+        // else if(acc_norm>1.044) dynamic_Kp = 0.8; //3m/s2水平加速度。
+        // else if(acc_norm>1.02) dynamic_Kp = 0.9; //2m/s2水平加速度。
+        dynamic_Kp= 1.0/acc_norm;
+        if(dynamic_Kp < 0.2) dynamic_Kp=0.2;
+        if(dynamic_Kp > 1.0) dynamic_Kp=1.0;
 
         //https://github.com/jremington/MPU-9250-AHRS/blob/master/MPU9250_Mahony/MPU9250_Mahony.ino
         //这个来源并没有检查加速度返回失败。

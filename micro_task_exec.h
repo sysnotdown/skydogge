@@ -309,6 +309,34 @@ class heading_yaw_adjust_record
         float spd;
 };
 
+//这组数据用来实现机身倾角变化和GPS加速度方向匹配，用于在盲目起飞下判定方向。
+class acc_heading_fit{
+
+    public:
+        acc_heading_fit() {
+            valid=false;
+        }
+
+        acc_heading_fit& operator=(const acc_heading_fit& o) {
+            valid=o.valid;
+            gps_acc_ang=o.gps_acc_ang;
+            gps_acc_norm=o.gps_acc_norm;
+            imu_acc_ang=o.imu_acc_ang;
+            imu_acc_norm=o.imu_acc_norm;
+            //yaw=o.yaw;
+            heading=o.heading;
+            return *this;
+        }
+
+        bool valid;
+        float gps_acc_norm;
+        float imu_acc_norm;
+        float gps_acc_ang;
+        float imu_acc_ang;
+        //float yaw;
+        float heading;
+};
+
 //当前假设X轴的正向是机头方向。Y轴正向是机身左侧方向。
 class CMotor;
 class CMicroTaskExec
@@ -377,6 +405,8 @@ public:
     float PowerCostForPin(float cur_spd, float current, float current_grow, int psolution, float ref_current, float& ref_mod_limit);
     float PowerCostForClimbing(int psolution, float ref_current, float ref_vspd);
     float calculate_baro_vertical_speed_50hz_n5();
+    float findDominantDirection(const std::vector<float>& angles);
+    float findDominantDirection(std::vector<acc_heading_fit>& angles, float& accnorm);
 };
 
 #endif

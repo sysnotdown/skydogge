@@ -352,6 +352,9 @@ float balance_x_ratio=0.50; //BALX 角加速度阻尼项
 float balance_w_ratio=0.12; //BALW 角速度调节项
 float balance_z_ratio=0.01; //BALZ 角加速度调节项
 
+float tof_height_main_ratio=0.1;
+float baro_height_main_ratio=0.12;
+
 //后期修正参数，数据转换后的残余误差在这里修正，看作是用户修正数据，每次起飞时可以做修正。
 //出场设置这里为0，因为出场设置时，根据当时环境矫正到无偏，不需要这个纠偏，
 //但后期飞行温度环境变化，会发生改变，则需要用这个参数调节。
@@ -369,6 +372,8 @@ float _baro_height=0.0; //气压高度，距离起飞点。这个值用来限制
 //指向正北方的yaw角度，通过这个角度可以判断当前机头朝向。
 //起飞时指定机头方向，这个值就自动设置。如果朝北这个值为0，朝东，这个值是90，朝南180.
 float _heading_yaw=0.0; 
+float _heading_yaw_reliable=0.0; //方向可靠性 0-1.0  //20250414+
+uint32_t _heading_yaw_update_counter=0; //无方向起飞时，用来记录更新次数
 
 #if defined USE_QMC5883 || defined USE_HMC5883
 uint32_t _heading_yaw_last_update_time=0; //0代表没有更新。
@@ -431,6 +436,7 @@ enum _predefined_command_ids
     _predefined_cmd_check_motor=4,
     _predefined_cmd_force_stable_baro_ctrl=5,
     _predefined_cmd_takeoff_compass=6,
+    _predefined_cmd_takeoff_none=7,
     _predefined_cmd_takeoff_north=8,
     _predefined_cmd_takeoff_south=9,
     _predefined_cmd_takeoff_east=10,
@@ -2321,11 +2327,15 @@ int Parse_Task_String(std::string ts, float& total_route)
                 {
                     double nlati, nlongi;
                     global_dist_angle_to_gps(lati_base, longi_base, vals[1], vals[0], nlati, nlongi);
+                    //计算本次移动距离。
+                    float dist, angle;
+                    global_gps_dist_angle(lati, longi, nlati, nlongi, dist, angle);
                     macro_exec.addtask_pin_to_corrdinate(nlongi, nlati, 3.0);
+
                     num_tasks++;
                     lati=nlati;
                     longi=nlongi;
-                    total_route+= vals[1];
+                    total_route+= dist;
                 }
                 else{
                     logmessage("wrong B\n");
@@ -2973,39 +2983,49 @@ static void macro_task_exec()
     else if(_initial_heading_update_method==head_north)
     {
         _heading_yaw=0;
+        _heading_yaw_reliable=1.0;
     }
     else if(_initial_heading_update_method==head_south)
     {
         _heading_yaw=179.9;
+        _heading_yaw_reliable=1.0;
     }
     else if(_initial_heading_update_method==head_east)
     {
         _heading_yaw=90.0;
+        _heading_yaw_reliable=1.0;
     }
     else if(_initial_heading_update_method==head_west)
     {
         _heading_yaw=-90.0;
+        _heading_yaw_reliable=1.0;
     }
     else if(_initial_heading_update_method==head_east_south)
     {
         _heading_yaw=135.0;
+        _heading_yaw_reliable=1.0;
     }
     else if(_initial_heading_update_method==head_east_north)
     {
         _heading_yaw=45.0;
+        _heading_yaw_reliable=1.0;
     }
     else if(_initial_heading_update_method==head_west_north)
     {
         _heading_yaw=-45.0;
+        _heading_yaw_reliable=1.0;
     }
     else if(_initial_heading_update_method==head_west_south)
     {
         _heading_yaw=-135.0;
+        _heading_yaw_reliable=1.0;
     }
     else if(_initial_heading_update_method==head_none)
     {
         //盲目起飞，方向固定为北。
         _heading_yaw=0.0;
+        _heading_yaw_reliable=0.0; //标记方向不可靠。
+        _heading_yaw_update_counter=0;
     }
 
 
@@ -3265,7 +3285,22 @@ nosleep:
                     char buf[128];
                     sprintf(buf, "got %d tasks, route %5.1f", n, total_route);
                     Send_remote_message(buf);
-                    goto nosleep;
+
+                    if(total_route > 25000) {
+                        //防止意外的坐标输入，如经纬度搞反了，那么飞行就可能飞到掉电。
+                        macro_exec.clear_task();
+                        Send_remote_message("too long route to run. check command.");
+                    }
+                    else if(total_route > 16000) {
+                        Send_remote_message("long route. be careful of power.");
+                        goto nosleep; //执行任务
+                    }
+                    else
+                    {
+                        goto nosleep; //执行任务
+                    }
+                    
+
                 }else{
                     macro_exec.clear_task(); //20240602+
                     Send_remote_message("parse cmd failed");
@@ -3286,11 +3321,19 @@ nosleep:
                 micro_task.yawspeed = yspd;
 
 
-                float rol= float(last_remote_info.pos4)/3.0; //最大角度放松到21.3度。
-                micro_task.roll= rol;
+                // float rol= float(last_remote_info.pos4)/3.0; //最大角度放松到21.3度。
+                // micro_task.roll= rol;
 
-                float pit= float(last_remote_info.pos3)/3.0;
-                micro_task.pitch= pit;
+                if(last_remote_info.pos4 > 64) micro_task.roll=64;
+                else if(last_remote_info.pos4 < -64) micro_task.roll=-64;
+                else micro_task.roll= last_remote_info.pos4;
+
+                // float pit= float(last_remote_info.pos3)/3.0;
+                // micro_task.pitch= pit;
+
+                if(last_remote_info.pos3 > 64) micro_task.pitch=64;
+                else if(last_remote_info.pos3 < -64) micro_task.pitch=-64;
+                else micro_task.pitch= last_remote_info.pos3; 
 
                 //因遥控更改，现在有约定，pos1是高度控制，>0升高
                 int8_t vs= -last_remote_info.pos1; //这里取反
@@ -4352,7 +4395,7 @@ void Check_baro_data()
             printf("no baro data\n");
         }
 
-        sleep_ms(200);
+        sleep_ms(1000);
     }
 
 }
@@ -5323,6 +5366,13 @@ getready:
                     Send_remote_message("no compass supoort");
                     #endif
                 }
+                else if(cmd==_predefined_cmd_takeoff_none)
+                {
+                    //起飞命令。
+                    _initial_heading_update_method = head_none;
+                    Send_remote_message("take off without heading");
+                    break;
+                }
                 else if(cmd==_predefined_cmd_takeoff_north)
                 {
                     //起飞命令。
@@ -5539,6 +5589,9 @@ full_auto_run:
     //全部电量消耗。20231112+
     sprintf(dbg, "power used %6.1f\n", system_power_used);
     logmessage(dbg);
+    sprintf(dbg, "total move=%6.1f\n", total_horizon_move/1000.0);
+    logmessage(dbg);
+
     //sprintf(dbg, "total distance=%f,%f\n", _total_gps_distance, _gps_distance_since_last_reset);
     //logmessage(dbg);
 
@@ -5557,9 +5610,8 @@ full_auto_run:
     Send_remote_message(15);
     Send_remote_proper_info(); //再次更新inair
 
-    char tm[128];
-    sprintf(tm, "total move=%6.1f", total_horizon_move/1000.0);
-    Send_remote_message(tm);
+    sprintf(dbg, "total move=%6.1f", total_horizon_move/1000.0);
+    Send_remote_message(dbg);
 
     //考虑在这里将记录数据发送给遥控器。
     //这样读取日志不需要从飞控上做。
